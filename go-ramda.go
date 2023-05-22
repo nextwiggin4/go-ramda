@@ -78,3 +78,11 @@ func Stream[T any](fn ...func(context.Context) func(<-chan T) <-chan T) func(ctx
 		}
 	}
 }
+
+func Pipe[I any, Intermediate any, O any](fn1 func(context.Context) func(<-chan I) <-chan Intermediate, fn2 func(context.Context) func(<-chan Intermediate) <-chan O) func(ctx context.Context) func(<-chan I) <-chan O {
+	return func(ctx context.Context) func(<-chan I) <-chan O {
+		return func(stream <-chan I) <-chan O {
+			return fn2(ctx)(fn1(ctx)(stream))
+		}
+	}
+}
