@@ -2,7 +2,25 @@ package goramda
 
 import (
 	"context"
+	"sync"
 )
+
+func Generate[T any](values ...T) func(ctx context.Context) <-chan T {
+	return func(ctx context.Context) <-chan T {
+		out := make(chan T)
+		go func() {
+			defer close(out)
+			for _, in := range values {
+				select {
+				case <-ctx.Done():
+					return
+				case out <- in:
+				}
+			}
+		}()
+		return out
+	}
+}
 
 func Stage[I any, O any](fn func(context.Context, I) O) func(ctx context.Context) func(stream <-chan I) <-chan O {
 	return func(ctx context.Context) func(stream <-chan I) <-chan O {
@@ -83,6 +101,101 @@ func Pipe[I any, Intermediate any, O any](fn1 func(context.Context) func(<-chan 
 	return func(ctx context.Context) func(<-chan I) <-chan O {
 		return func(stream <-chan I) <-chan O {
 			return fn2(ctx)(fn1(ctx)(stream))
+		}
+	}
+}
+
+func fanIn[T any](ctx context.Context, streams ...<-chan T) <-chan T {
+	var wg sync.WaitGroup
+	out := make(chan T)
+
+	multiplex := func(c <-chan T) {
+		defer wg.Done()
+		for in := range c {
+			select {
+			case <-ctx.Done():
+				return
+			case out <- in:
+			}
+		}
+	}
+
+	wg.Add(len(streams))
+
+	for _, stream := range streams {
+		go multiplex(stream)
+	}
+
+	go func() {
+		wg.Wait()
+		close(out)
+	}()
+
+	return out
+}
+
+func fanInOrdered[T any](ctx context.Context, streams ...<-chan T) <-chan T {
+	out := make(chan T)
+	go func() {
+		defer close(out)
+
+		i := 0
+		for {
+			stream := streams[i%len(streams)]
+			select {
+			case <-ctx.Done():
+				return
+			case in, ok := <-stream:
+				if !ok {
+					return
+				}
+				out <- in
+			}
+			i++
+		}
+	}()
+	return out
+}
+
+// func fanInOrdered[T any](ctx context.Context, streams <-chan <-chan T) <-chan T {
+// 	var wg sync.WaitGroup
+// 	out := make(chan T)
+
+// 	multiplex := func(c <-chan T) {
+// 		defer wg.Done()
+// 		for in := range c {
+// 			select {
+// 			case <-ctx.Done():
+// 				return
+// 			case out <- in:
+// 			}
+// 		}
+// 	}
+
+// 	wg.Add(len(streams))
+
+// 	for _, stream := range streams {
+// 		// go multiplex(stream)
+// 	}
+
+// 	go func() {
+// 		wg.Wait()
+// 		close(out)
+// 	}()
+
+// 	return out
+// }
+
+func FanStage[I any, O any](numOfChannels int, fn func(context.Context, I) O) func(ctx context.Context) func(stream <-chan I) <-chan O {
+	return func(ctx context.Context) func(stream <-chan I) <-chan O {
+
+		return func(stream <-chan I) <-chan O {
+			channels := make([]<-chan O, numOfChannels)
+			for i := 0; i < numOfChannels; i++ {
+				channels[i] = Stage(fn)(ctx)(stream)
+			}
+
+			return fanIn(ctx, channels...)
 		}
 	}
 }
